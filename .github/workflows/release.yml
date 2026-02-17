@@ -1,0 +1,70 @@
+name: Release
+
+# v로 시작하는 태그가 push되면 실행
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build with Gradle
+        run: ./gradlew build -x test
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # 이전 태그 찾기
+          PREV_TAG=$(git tag --sort=-v:refname | head -2 | tail -1)
+          if [ "$PREV_TAG" = "${{ steps.version.outputs.VERSION }}" ]; then
+            # 첫 번째 태그인 경우 전체 로그
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" | head -50)
+          else
+            CHANGELOG=$(git log ${PREV_TAG}..${{ steps.version.outputs.VERSION }} --pretty=format:"- %s (%h)")
+          fi
+          # multiline output
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: Release ${{ steps.version.outputs.VERSION }}
+          body: |
+            ## MediView ${{ steps.version.outputs.VERSION }}
+
+            ### Changes
+            ${{ steps.changelog.outputs.CHANGELOG }}
+
+            ### Build Info
+            - Java: 21
+            - Spring Boot: 4.0.2
+            - Build: Gradle
+          files: |
+            build/libs/*.jar
+          draft: false
+          prerelease: false
