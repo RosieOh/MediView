@@ -1,10 +1,9 @@
 name: Release
 
-# v로 시작하는 태그가 push되면 실행
+# main에 push되면 자동으로 버전 증가 + 릴리스 생성
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches: [ main ]
 
 permissions:
   contents: write
@@ -16,6 +15,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 전체 히스토리 (태그 포함)
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -29,33 +30,74 @@ jobs:
       - name: Build with Gradle
         run: ./gradlew build -x test
 
-      - name: Extract version from tag
+      - name: Determine next version
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: |
+          # 최신 태그 가져오기
+          LATEST_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            # 태그가 없으면 v1.0.0부터 시작
+            NEXT_VERSION="v1.0.0"
+            echo "PREV_TAG=" >> $GITHUB_OUTPUT
+          else
+            echo "PREV_TAG=$LATEST_TAG" >> $GITHUB_OUTPUT
+
+            # 버전 파싱
+            VERSION=${LATEST_TAG#v}
+            MAJOR=$(echo $VERSION | cut -d. -f1)
+            MINOR=$(echo $VERSION | cut -d. -f2)
+            PATCH=$(echo $VERSION | cut -d. -f3)
+
+            # 커밋 메시지 기반 버전 결정
+            COMMITS=$(git log ${LATEST_TAG}..HEAD --pretty=format:"%s")
+
+            if echo "$COMMITS" | grep -qiE "^BREAKING|^major"; then
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+            elif echo "$COMMITS" | grep -qiE "^FEAT|^feat|^feature"; then
+              MINOR=$((MINOR + 1))
+              PATCH=0
+            else
+              PATCH=$((PATCH + 1))
+            fi
+
+            NEXT_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
+          echo "NEXT_VERSION=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "Next version: $NEXT_VERSION"
 
       - name: Generate changelog
         id: changelog
         run: |
-          # 이전 태그 찾기
-          PREV_TAG=$(git tag --sort=-v:refname | head -2 | tail -1)
-          if [ "$PREV_TAG" = "${{ steps.version.outputs.VERSION }}" ]; then
-            # 첫 번째 태그인 경우 전체 로그
+          PREV_TAG="${{ steps.version.outputs.PREV_TAG }}"
+
+          if [ -z "$PREV_TAG" ]; then
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" | head -50)
           else
-            CHANGELOG=$(git log ${PREV_TAG}..${{ steps.version.outputs.VERSION }} --pretty=format:"- %s (%h)")
+            CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)")
           fi
-          # multiline output
+
           echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
           echo "$CHANGELOG" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
+      - name: Create tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a ${{ steps.version.outputs.NEXT_VERSION }} -m "Release ${{ steps.version.outputs.NEXT_VERSION }}"
+          git push origin ${{ steps.version.outputs.NEXT_VERSION }}
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.VERSION }}
-          name: Release ${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ steps.version.outputs.NEXT_VERSION }}
+          name: Release ${{ steps.version.outputs.NEXT_VERSION }}
           body: |
-            ## MediView ${{ steps.version.outputs.VERSION }}
+            ## MediView ${{ steps.version.outputs.NEXT_VERSION }}
 
             ### Changes
             ${{ steps.changelog.outputs.CHANGELOG }}
